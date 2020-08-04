@@ -4,6 +4,7 @@ extern crate fnv;
 extern crate num_cpus;
 extern crate regex;
 extern crate pbr;
+extern crate ocl;
 
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use clap::App;
@@ -17,6 +18,8 @@ use std::io::prelude::*;
 use std::sync::Arc;
 use std::thread;
 use pbr::MultiBar;
+use ocl::{Context, Queue, Device, Program, Buffer, MemFlags, Kernel, SpatialDims};
+use ocl::enums::MemInfo;
 
 pub struct Config {
     big_endian: bool,
@@ -25,6 +28,7 @@ pub struct Config {
     max_matches: usize,
     offset: u32,
     threads: usize,
+    opencl: bool,
 }
 
 impl Config {
@@ -42,7 +46,8 @@ impl Config {
                 -m, --minstrlen=[LEN]   'Minimum string search length (default is 10)'
                 -n, --maxmatches=[LEN]   'Maximum matches to display (default is 10)'
                 -o, --offset=[LEN]      'Scan every N (power of 2) addresses. (default is 0x1000)'
-                -t  --threads=[NUM_THREADS] '# of threads to spawn. (default is # of cpu cores)'",
+                -t  --threads=[NUM_THREADS] '# of threads to spawn. (default is # of cpu cores)'
+                -c  --opencl                'Use OpenCL for the search'",
             )
             .get_matches();
 
@@ -83,6 +88,7 @@ impl Config {
                 },
                 Err(_) => return Err("failed to parse threads"),
             },
+            opencl: arg_matches.is_present("opencl"),
         };
 
         Ok(config)
@@ -193,6 +199,124 @@ fn find_matches(
     Ok(heap)
 }
 
+fn cpu_search(config: &Arc<Config>, strings: &Arc<FnvHashSet<u32>>, pointers: &Arc<FnvHashSet<u32>>) -> BinaryHeap::<(usize, u32)> {
+    let mut children = vec![];
+
+    let mb = MultiBar::new();
+    mb.println(&format!("Scanning with {} threads...", config.threads));
+    for i in 0..config.threads {
+        let mut pb = mb.create_bar(100);
+        pb.show_message = true;
+        let child_config = Arc::clone(&config);
+        let child_strings = Arc::clone(&strings);
+        let child_pointers = Arc::clone(&pointers);
+        children.push(thread::spawn(move || {
+            find_matches(&child_config, &child_strings, &child_pointers, i, pb)
+        }));
+    }
+
+    mb.listen();
+
+    // Merge all of the heaps.
+    let mut heap = BinaryHeap::<(usize, u32)>::new();
+    for child in children {
+        heap.append(&mut child.join().unwrap().unwrap());
+    }
+
+    heap
+}
+
+fn opencl_search(config: &Arc<Config>, strings: &Vec<u32>, pointers: &Vec<u32>) -> BinaryHeap::<(usize, u32)> {
+    let compute_program = r#"
+        __kernel void find(__global read_only uint* strings, 
+        ulong str_count, 
+        __global read_only uint* pointers,
+        ulong ptr_count,
+        __global write_only uint* results) {
+            uint current_addr = get_global_id(0) * 0x1000;
+            uint intersect_count = 0;
+            for (uint i=0; i<str_count; i++) {
+                for (uint j=0; j<ptr_count; j++) {
+                    unsigned long translated_string = ((ulong)strings[i]) + ((ulong)current_addr);
+                    if (translated_string > 0xffffffff) {
+                        continue;
+                    }
+                    if (pointers[j] == translated_string) {
+                        intersect_count += 1;
+                    }
+                }
+            }
+            results[get_global_id(0)] = intersect_count;
+        }
+    "#;
+    if config.offset != 0x1000 {
+        panic!("in opencl mode we support only 0x1000 offset");
+    }
+    let context = Context::builder().devices(Device::specifier()
+        .type_flags(ocl::flags::DEVICE_TYPE_GPU).first()).build().unwrap();
+
+    let device = context.devices()[0];
+    let queue = Queue::new(&context, device, None).unwrap();
+    let program = Program::builder()
+        .src(compute_program)
+        .devices(device)
+        .build(&context)
+        .unwrap();
+
+    let string_buffer = Buffer::<u32>::builder()
+        .queue(queue.clone())
+        .flags(MemFlags::new().read_only())
+        .len(strings.len())
+        .copy_host_slice(&strings)
+        .build().expect("cannot build the strings buffer");
+
+    let pointer_buffer = Buffer::<u32>::builder()
+        .queue(queue.clone())
+        .flags(MemFlags::new().read_only())
+        .len(pointers.len())
+        .copy_host_slice(&pointers)
+        .build().expect("cannot build the pointers buffer");
+
+    let result_buffer = Buffer::<u32>::builder()
+        .queue(queue.clone())
+        .flags(MemFlags::new().write_only())
+        .len(0x100000)
+        .build().expect("cannot build the results buffer");
+
+    // println!("{:?}", result_buffer.mem_info(MemInfo::Size).unwrap() + pointer_buffer.mem_info(MemInfo::Size).unwrap() + string_buffer.mem_info(MemInfo::Size).unwrap());
+    println!("result_buffer {:?}", result_buffer.mem_info(MemInfo::Size).unwrap());
+    println!("pointer_buffer {:?}", pointer_buffer.mem_info(MemInfo::Size).unwrap());
+    println!("string_buffer {:?}", string_buffer.mem_info(MemInfo::Size).unwrap());
+
+    let kernel = Kernel::builder()
+        .program(&program)
+        .name("find")
+        .queue(queue.clone())
+        .global_work_size(SpatialDims::One(0x100000))
+        .arg_named("strings", &string_buffer)
+        .arg_named("str_count", string_buffer.len())
+        .arg_named("pointers", &pointer_buffer)
+        .arg_named("ptr_count", pointer_buffer.len())
+        .arg_named("results", &result_buffer)
+        .build().unwrap();
+
+    unsafe { kernel.enq().unwrap(); }
+
+    let mut vec_result = vec![0u32; result_buffer.len()];
+    result_buffer.read(&mut vec_result).enq().unwrap();
+    // println!("{:?}", vec_result);
+
+    queue.finish().unwrap();
+    let mut heap = BinaryHeap::<(usize, u32)>::new();
+    for page in 0..(0x100000) {
+        let count = vec_result[page];
+        if count > 0 {
+            heap.push((count as usize, (page*0x1000) as u32));
+        }
+    }
+    heap
+}
+
 pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     // Read in the input file. We jam it all into memory for now.
     let mut f = File::open(&config.filename)?;
@@ -210,32 +334,24 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let pointers = get_pointers(&config, &buffer)?;
     eprintln!("Located {} pointers", pointers.len());
 
-    let mut children = vec![];
     let shared_config = Arc::new(config);
-    let shared_strings = Arc::new(strings);
-    let shared_pointers = Arc::new(pointers);
 
 
-    let mb = MultiBar::new();
-    mb.println(&format!("Scanning with {} threads...", shared_config.threads));
-    for i in 0..shared_config.threads {
-        let mut pb = mb.create_bar(100);
-        pb.show_message = true;
-        let child_config = Arc::clone(&shared_config);
-        let child_strings = Arc::clone(&shared_strings);
-        let child_pointers = Arc::clone(&shared_pointers);
-        children.push(thread::spawn(move || {
-            find_matches(&child_config, &child_strings, &child_pointers, i, pb)
-        }));
-    }
-
-    mb.listen();
-
-    // Merge all of the heaps.
-    let mut heap = BinaryHeap::<(usize, u32)>::new();
-    for child in children {
-        heap.append(&mut child.join().unwrap().unwrap());
-    }
+    let mut heap = if shared_config.opencl{
+        let mut strings_vec = Vec::<u32>::new();
+        for s in strings {
+            strings_vec.push(s);
+        }
+        let mut pointers_vec = Vec::<u32>::new();
+        for p in pointers {
+            pointers_vec.push(p);
+        }
+        opencl_search(&shared_config, &strings_vec, &pointers_vec)
+    } else {
+        let shared_strings = Arc::new(strings);
+        let shared_pointers = Arc::new(pointers);
+        cpu_search(&shared_config, &shared_strings, &shared_pointers)
+    };
 
     // Print (up to) top N results.
     for _ in 0..shared_config.max_matches {
