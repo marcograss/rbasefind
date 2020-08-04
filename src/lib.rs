@@ -283,11 +283,6 @@ fn opencl_search(config: &Arc<Config>, strings: &Vec<u32>, pointers: &Vec<u32>) 
         .len(0x100000)
         .build().expect("cannot build the results buffer");
 
-    // println!("{:?}", result_buffer.mem_info(MemInfo::Size).unwrap() + pointer_buffer.mem_info(MemInfo::Size).unwrap() + string_buffer.mem_info(MemInfo::Size).unwrap());
-    println!("result_buffer {:?}", result_buffer.mem_info(MemInfo::Size).unwrap());
-    println!("pointer_buffer {:?}", pointer_buffer.mem_info(MemInfo::Size).unwrap());
-    println!("string_buffer {:?}", string_buffer.mem_info(MemInfo::Size).unwrap());
-
     let kernel = Kernel::builder()
         .program(&program)
         .name("find")
@@ -304,7 +299,6 @@ fn opencl_search(config: &Arc<Config>, strings: &Vec<u32>, pointers: &Vec<u32>) 
 
     let mut vec_result = vec![0u32; result_buffer.len()];
     result_buffer.read(&mut vec_result).enq().unwrap();
-    // println!("{:?}", vec_result);
 
     queue.finish().unwrap();
     let mut heap = BinaryHeap::<(usize, u32)>::new();
