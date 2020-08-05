@@ -19,7 +19,6 @@ use std::sync::Arc;
 use std::thread;
 use pbr::MultiBar;
 use ocl::{Context, Queue, Device, Program, Buffer, MemFlags, Kernel, SpatialDims};
-use ocl::enums::MemInfo;
 
 pub struct Config {
     big_endian: bool,
@@ -136,12 +135,12 @@ impl Interval {
     }
 }
 
-fn get_strings(config: &Config, buffer: &[u8]) -> Result<FnvHashSet<u32>, Box<dyn Error>> {
-    let mut strings = FnvHashSet::default();
+fn get_strings(config: &Config, buffer: &[u8]) -> Result<Vec<u32>, Box<dyn Error>> {
+    let mut strings = Vec::<u32>::new();
 
     let reg_str = format!("[ -~\\t\\r\\n]{{{},}}\x00", config.min_str_len);
     for mat in Regex::new(&reg_str)?.find_iter(&buffer[..]) {
-        strings.insert(mat.start() as u32);
+        strings.push(mat.start() as u32);
     }
 
     Ok(strings)
@@ -167,7 +166,7 @@ fn get_pointers(config: &Config, buffer: &[u8]) -> Result<FnvHashSet<u32>, Box<d
 
 fn find_matches(
     config: &Config,
-    strings: &FnvHashSet<u32>,
+    strings: &Vec<u32>,
     pointers: &FnvHashSet<u32>,
     scan_interval: usize,
     mut pb: pbr::ProgressBar<pbr::Pipe>,
@@ -181,7 +180,9 @@ fn find_matches(
         for s in strings {
             match s.checked_add(current_addr) {
                 Some(add) => news.insert(add),
-                None => continue,
+                // strings are now ordered, if it overflows u32 we can just break instead of continuing,
+                // it will overflow u32 also for the strings after.
+                None => break,
             };
         }
         let intersection: FnvHashSet<_> = news.intersection(pointers).collect();
@@ -199,7 +200,7 @@ fn find_matches(
     Ok(heap)
 }
 
-fn cpu_search(config: &Arc<Config>, strings: &Arc<FnvHashSet<u32>>, pointers: &Arc<FnvHashSet<u32>>) -> BinaryHeap::<(usize, u32)> {
+fn cpu_search(config: &Arc<Config>, strings: &Arc<Vec<u32>>, pointers: &Arc<FnvHashSet<u32>>) -> BinaryHeap::<(usize, u32)> {
     let mut children = vec![];
 
     let mb = MultiBar::new();
@@ -236,11 +237,11 @@ fn opencl_search(config: &Arc<Config>, strings: &Vec<u32>, pointers: &Vec<u32>) 
             uint current_addr = get_global_id(0) * 0x1000;
             uint intersect_count = 0;
             for (uint i=0; i<str_count; i++) {
+                unsigned long translated_string = ((ulong)strings[i]) + ((ulong)current_addr);
+                if (translated_string > 0xffffffff) {
+                        break;
+                }
                 for (uint j=0; j<ptr_count; j++) {
-                    unsigned long translated_string = ((ulong)strings[i]) + ((ulong)current_addr);
-                    if (translated_string > 0xffffffff) {
-                        continue;
-                    }
                     if (pointers[j] == translated_string) {
                         intersect_count += 1;
                     }
@@ -332,15 +333,11 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
 
 
     let mut heap = if shared_config.opencl{
-        let mut strings_vec = Vec::<u32>::new();
-        for s in strings {
-            strings_vec.push(s);
-        }
         let mut pointers_vec = Vec::<u32>::new();
         for p in pointers {
             pointers_vec.push(p);
         }
-        opencl_search(&shared_config, &strings_vec, &pointers_vec)
+        opencl_search(&shared_config, &strings, &pointers_vec)
     } else {
         let shared_strings = Arc::new(strings);
         let shared_pointers = Arc::new(pointers);
