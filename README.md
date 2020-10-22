@@ -14,6 +14,7 @@ USAGE:
 FLAGS:
     -b, --bigendian    Interpret as Big Endian (default is little)
     -h, --help         Prints help information
+    -c, --opencl       Use OpenCL for the search
     -V, --version      Prints version information
 
 OPTIONS:
@@ -72,6 +73,38 @@ Scanning with 8 threads...
 real	0m0.149s
 user	0m0.751s
 sys	0m0.012s
+```
+
+## GPU Acceleration
+
+With the `-c` flag you can run the search with OpenCL on the GPU for (sometimes) faster performances, for example:
+
+### CPU
+```
+ubuntu@VM-0-6-ubuntu:~/rbasefind$ time cargo run --release -- ~/bootloader.elf 
+Located 1176 strings
+Located 18670 pointers
+Scanning with 4 threads...
+
+0x40056000: 19
+...
+
+real	4m54.771s
+user	1m54.783s
+sys	0m16.799s
+```
+### GPU
+```
+ubuntu@VM-0-6-ubuntu:~/rbasefind$ time cargo run --release -- -c ~/bootloader.elf 
+Located 1176 strings
+Located 18670 pointers
+
+0x40056000: 19
+...
+
+real	2m25.881s
+user	1m53.566s
+sys	0m43.867s
 ```
 
 ## TODO
