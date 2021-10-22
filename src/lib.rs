@@ -142,7 +142,7 @@ fn get_strings(config: &Config, buffer: &[u8]) -> Result<FnvHashSet<u32>, Box<dy
     let mut strings = FnvHashSet::default();
 
     let reg_str = format!("[ -~\\t\\r\\n]{{{},}}\x00", config.min_str_len);
-    for mat in Regex::new(&reg_str)?.find_iter(&buffer[..]) {
+    for mat in Regex::new(&reg_str)?.find_iter(buffer) {
         strings.insert(mat.start() as u32);
     }
 
