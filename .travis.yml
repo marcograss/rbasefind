@@ -1,0 +1,13 @@
+language: rust
+
+arch:
+  - arm64
+
+rust:
+  - stable
+  - beta
+  - nightly
+matrix:
+  allow_failures:
+    - rust: nightly
+  fast_finish: true
