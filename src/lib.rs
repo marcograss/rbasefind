@@ -1,10 +1,3 @@
-extern crate byteorder;
-extern crate clap;
-extern crate fnv;
-extern crate num_cpus;
-extern crate pbr;
-extern crate regex;
-
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use clap::App;
 use fnv::FnvHashSet;

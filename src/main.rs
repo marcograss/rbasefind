@@ -1,9 +1,3 @@
-extern crate byteorder;
-extern crate clap;
-extern crate fnv;
-extern crate rbasefind;
-extern crate regex;
-
 use rbasefind::Config;
 use std::process;
 
