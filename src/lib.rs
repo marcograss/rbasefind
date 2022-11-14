@@ -1,5 +1,5 @@
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
-use clap::App;
+use clap::{Arg, ArgAction, Command};
 use fnv::FnvHashSet;
 use pbr::MultiBar;
 use regex::bytes::Regex;
@@ -26,37 +26,82 @@ pub struct Config {
 
 impl Config {
     pub fn new() -> Result<Config, &'static str> {
-        let arg_matches = App::new("rbasefind")
+        let arg_matches = Command::new("rbasefind")
             .version("0.1.3")
             .author("Scott G. <github.scott@gmail.com>")
             .about(
                 "Scan a flat 32-bit binary and attempt to brute-force the base address via \
                  string/pointer comparison. Based on the excellent basefind.py by mncoppola.",
             )
-            .args_from_usage(
-                "<INPUT>                    'The input binary to scan'
-                -b, --bigendian             'Interpret as big-endian (default is little)'
-                -m, --minstrlen=[LEN]       'Minimum string search length (default is 10)'
-                -n, --maxmatches=[LEN]      'Maximum matches to display (default is 10)'
-                -p, --progress              'Show progress'
-                -o, --offset=[LEN]          'Scan every N (power of 2) addresses. (default is 0x1000)'
-                -t  --threads=[NUM_THREADS] '# of threads to spawn. (default is # of cpu cores)'",
+            .arg(
+                Arg::new("INPUT")
+                    .help("The input binary to scan")
+                    .required(true),
+            )
+            .arg(
+                Arg::new("bigendian")
+                    .long("bigendian")
+                    .short('b')
+                    .action(ArgAction::SetTrue)
+                    .help("Interpret as big-endian (default is little)"),
+            )
+            .arg(
+                Arg::new("minstrlen")
+                    .long("minstrlen")
+                    .short('m')
+                    .help("Minimum string search length (default is 10)"),
+            )
+            .arg(
+                Arg::new("maxmatches")
+                    .long("maxmatches")
+                    .short('n')
+                    .help("Maximum matches to display (default is 10)"),
+            )
+            .arg(
+                Arg::new("progress")
+                    .long("progress")
+                    .short('p')
+                    .action(ArgAction::SetTrue)
+                    .help("Show progress"),
+            )
+            .arg(
+                Arg::new("offset")
+                    .long("offset")
+                    .short('o')
+                    .help("Scan every N (power of 2) addresses. (default is 0x1000)"),
+            )
+            .arg(
+                Arg::new("threads")
+                    .long("threads")
+                    .short('t')
+                    .help("# of threads to spawn. (default is # of cpu cores)"),
             )
             .get_matches();
 
         let config = Config {
-            big_endian: arg_matches.is_present("bigendian"),
-            filename: arg_matches.value_of("INPUT").unwrap().to_string(),
-            max_matches: match arg_matches.value_of("maxmatches").unwrap_or("10").parse() {
+            big_endian: arg_matches.get_flag("bigendian"),
+            filename: arg_matches.get_one::<String>("INPUT").unwrap().to_string(),
+            max_matches: match arg_matches
+                .get_one::<String>("maxmatches")
+                .unwrap_or(&"10".to_string())
+                .parse()
+            {
                 Ok(v) => v,
                 Err(_) => return Err("failed to parse maxmatches"),
             },
-            min_str_len: match arg_matches.value_of("minstrlen").unwrap_or("10").parse() {
+            min_str_len: match arg_matches
+                .get_one::<String>("minstrlen")
+                .unwrap_or(&"10".to_string())
+                .parse()
+            {
                 Ok(v) => v,
                 Err(_) => return Err("failed to parse minstrlen"),
             },
             offset: {
-                let offset_str = &arg_matches.value_of("offset").unwrap_or("0x1000");
+                let offset_str = arg_matches
+                    .get_one::<String>("offset")
+                    .unwrap_or(&"0x1000".to_string())
+                    .clone();
                 if offset_str.len() <= 2 {
                     return Err("offset format is invalid");
                 }
@@ -73,8 +118,12 @@ impl Config {
                 }
                 offset_num
             },
-            progress: arg_matches.is_present("progress"),
-            threads: match arg_matches.value_of("threads").unwrap_or("0").parse() {
+            progress: arg_matches.get_flag("progress"),
+            threads: match arg_matches
+                .get_one::<String>("threads")
+                .unwrap_or(&"0".to_string())
+                .parse()
+            {
                 Ok(v) => {
                     if v == 0 {
                         num_cpus::get()
@@ -216,9 +265,10 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let shared_strings = Arc::new(strings);
     let shared_pointers = Arc::new(pointers);
 
-    let bar_output = match shared_config.progress {
-        false => Box::new(sink()) as Box<dyn Write>,
-        true => Box::new(stderr()) as Box<dyn Write>,
+    let bar_output = if shared_config.progress {
+        Box::new(stderr()) as Box<dyn Write>
+    } else {
+        Box::new(sink()) as Box<dyn Write>
     };
 
     let mb = MultiBar::on(bar_output);
