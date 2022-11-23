@@ -1,4 +1,5 @@
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
+use clap::ArgMatches;
 use clap::{Arg, ArgAction, Command};
 use fnv::FnvHashSet;
 use pbr::MultiBar;
@@ -26,57 +27,7 @@ pub struct Config {
 
 impl Config {
     pub fn new() -> Result<Config, &'static str> {
-        let arg_matches = Command::new("rbasefind")
-            .version("0.1.3")
-            .author("Scott G. <github.scott@gmail.com>")
-            .about(
-                "Scan a flat 32-bit binary and attempt to brute-force the base address via \
-                 string/pointer comparison. Based on the excellent basefind.py by mncoppola.",
-            )
-            .arg(
-                Arg::new("INPUT")
-                    .help("The input binary to scan")
-                    .required(true),
-            )
-            .arg(
-                Arg::new("bigendian")
-                    .long("bigendian")
-                    .short('b')
-                    .action(ArgAction::SetTrue)
-                    .help("Interpret as big-endian (default is little)"),
-            )
-            .arg(
-                Arg::new("minstrlen")
-                    .long("minstrlen")
-                    .short('m')
-                    .help("Minimum string search length (default is 10)"),
-            )
-            .arg(
-                Arg::new("maxmatches")
-                    .long("maxmatches")
-                    .short('n')
-                    .help("Maximum matches to display (default is 10)"),
-            )
-            .arg(
-                Arg::new("progress")
-                    .long("progress")
-                    .short('p')
-                    .action(ArgAction::SetTrue)
-                    .help("Show progress"),
-            )
-            .arg(
-                Arg::new("offset")
-                    .long("offset")
-                    .short('o')
-                    .help("Scan every N (power of 2) addresses. (default is 0x1000)"),
-            )
-            .arg(
-                Arg::new("threads")
-                    .long("threads")
-                    .short('t')
-                    .help("# of threads to spawn. (default is # of cpu cores)"),
-            )
-            .get_matches();
+        let arg_matches = Config::get_matches();
 
         let config = Config {
             big_endian: arg_matches.get_flag("bigendian"),
@@ -137,6 +88,60 @@ impl Config {
 
         Ok(config)
     }
+
+    fn get_matches() -> ArgMatches {
+        Command::new("rbasefind")
+            .version("0.1.3")
+            .author("Scott G. <github.scott@gmail.com>")
+            .about(
+                "Scan a flat 32-bit binary and attempt to brute-force the base address via \
+                 string/pointer comparison. Based on the excellent basefind.py by mncoppola.",
+            )
+            .arg(
+                Arg::new("INPUT")
+                    .help("The input binary to scan")
+                    .required(true),
+            )
+            .arg(
+                Arg::new("bigendian")
+                    .long("bigendian")
+                    .short('b')
+                    .action(ArgAction::SetTrue)
+                    .help("Interpret as big-endian (default is little)"),
+            )
+            .arg(
+                Arg::new("minstrlen")
+                    .long("minstrlen")
+                    .short('m')
+                    .help("Minimum string search length (default is 10)"),
+            )
+            .arg(
+                Arg::new("maxmatches")
+                    .long("maxmatches")
+                    .short('n')
+                    .help("Maximum matches to display (default is 10)"),
+            )
+            .arg(
+                Arg::new("progress")
+                    .long("progress")
+                    .short('p')
+                    .action(ArgAction::SetTrue)
+                    .help("Show progress"),
+            )
+            .arg(
+                Arg::new("offset")
+                    .long("offset")
+                    .short('o')
+                    .help("Scan every N (power of 2) addresses. (default is 0x1000)"),
+            )
+            .arg(
+                Arg::new("threads")
+                    .long("threads")
+                    .short('t')
+                    .help("# of threads to spawn. (default is # of cpu cores)"),
+            )
+            .get_matches()
+    }
 }
 
 pub struct Interval {
@@ -191,7 +196,7 @@ fn get_strings(config: &Config, buffer: &[u8]) -> Result<FnvHashSet<u32>, Box<dy
     Ok(strings)
 }
 
-fn get_pointers(config: &Config, buffer: &[u8]) -> Result<FnvHashSet<u32>, Box<dyn Error>> {
+fn get_pointers(config: &Config, buffer: &[u8]) -> FnvHashSet<u32> {
     let mut pointers = FnvHashSet::default();
     let mut rdr = Cursor::new(&buffer);
     loop {
@@ -206,7 +211,7 @@ fn get_pointers(config: &Config, buffer: &[u8]) -> Result<FnvHashSet<u32>, Box<d
         };
     }
 
-    Ok(pointers)
+    pointers
 }
 
 fn find_matches(
@@ -219,7 +224,7 @@ fn find_matches(
     let interval = Interval::get_range(scan_interval, config.threads, config.offset)?;
     let mut current_addr = interval.start_addr;
     let mut heap = BinaryHeap::<(usize, u32)>::new();
-    pb.total = ((interval.end_addr - interval.start_addr) / config.offset) as u64;
+    pb.total = u64::from((interval.end_addr - interval.start_addr) / config.offset);
     while current_addr <= interval.end_addr {
         let mut news = FnvHashSet::default();
         for s in strings {
@@ -257,7 +262,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     }
     eprintln!("Located {} strings", strings.len());
 
-    let pointers = get_pointers(&config, &buffer)?;
+    let pointers = get_pointers(&config, &buffer);
     eprintln!("Located {} pointers", pointers.len());
 
     let mut children = vec![];
