@@ -177,8 +177,8 @@ impl Interval {
         }
 
         let interval = Interval {
-            start_addr: start_addr as u32,
-            end_addr: end_addr as u32,
+            start_addr: start_addr.try_into()?,
+            end_addr: end_addr.try_into()?,
         };
 
         Ok(interval)
@@ -190,7 +190,7 @@ fn get_strings(config: &Config, buffer: &[u8]) -> Result<FnvHashSet<u32>, Box<dy
 
     let reg_str = format!("[ -~\\t\\r\\n]{{{},}}\x00", config.min_str_len);
     for mat in Regex::new(&reg_str)?.find_iter(buffer) {
-        strings.insert(mat.start() as u32);
+        strings.insert(mat.start().try_into()?);
     }
 
     Ok(strings)
