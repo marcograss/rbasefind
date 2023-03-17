@@ -26,10 +26,14 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn new() -> Result<Config, &'static str> {
-        let arg_matches = Config::get_matches();
+    /// # Panics
+    /// can panic on erroneous configuration
+    /// # Errors
+    /// can error if fails to parse some parameters or wrong format
+    pub fn new() -> Result<Self, &'static str> {
+        let arg_matches = Self::get_matches();
 
-        let config = Config {
+        let config = Self {
             big_endian: arg_matches.get_flag("bigendian"),
             filename: arg_matches.get_one::<String>("INPUT").unwrap().to_string(),
             max_matches: match arg_matches
@@ -59,10 +63,7 @@ impl Config {
                 if &offset_str[0..2] != "0x" {
                     return Err("ensure offset parameter begins with 0x.");
                 }
-                let offset_num = match u32::from_str_radix(&offset_str[2..], 16) {
-                    Ok(v) => v,
-                    Err(_) => return Err("failed to parse offset"),
-                };
+                let Ok(offset_num) = u32::from_str_radix(&offset_str[2..], 16) else { return Err("failed to parse offset") };
                 // This check also prevents offset_num from being zero.
                 if offset_num.count_ones() != 1 {
                     return Err("Offset is not a power of 2");
@@ -154,7 +155,7 @@ impl Interval {
         index: usize,
         max_threads: usize,
         offset: u32,
-    ) -> Result<Interval, Box<dyn Error + Send + Sync>> {
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         if index >= max_threads {
             return Err("Invalid index specified".into());
         }
@@ -176,7 +177,7 @@ impl Interval {
             end_addr &= !(u64::from(offset) - 1);
         }
 
-        let interval = Interval {
+        let interval = Self {
             start_addr: start_addr.try_into()?,
             end_addr: end_addr.try_into()?,
         };
@@ -300,11 +301,8 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
 
     // Print (up to) top N results.
     for _ in 0..shared_config.max_matches {
-        let (count, addr) = match heap.pop() {
-            Some(v) => v,
-            None => break,
-        };
-        println!("0x{:08x}: {}", addr, count);
+        let Some((count, addr)) = heap.pop() else { break };
+        println!("0x{addr:08x}: {count}");
     }
 
     Ok(())
