@@ -63,7 +63,9 @@ impl Config {
                 if &offset_str[0..2] != "0x" {
                     return Err("ensure offset parameter begins with 0x.");
                 }
-                let Ok(offset_num) = u32::from_str_radix(&offset_str[2..], 16) else { return Err("failed to parse offset") };
+                let Ok(offset_num) = u32::from_str_radix(&offset_str[2..], 16) else {
+                    return Err("failed to parse offset");
+                };
                 // This check also prevents offset_num from being zero.
                 if offset_num.count_ones() != 1 {
                     return Err("Offset is not a power of 2");
@@ -220,7 +222,7 @@ fn find_matches(
     strings: &FnvHashSet<u32>,
     pointers: &FnvHashSet<u32>,
     scan_interval: usize,
-    mut pb: pbr::ProgressBar<pbr::Pipe>,
+    pb: &mut pbr::ProgressBar<pbr::Pipe>,
 ) -> Result<BinaryHeap<(usize, u32)>, Box<dyn Error + Send + Sync>> {
     let interval = Interval::get_range(scan_interval, config.threads, config.offset)?;
     let mut current_addr = interval.start_addr;
@@ -244,7 +246,8 @@ fn find_matches(
         };
         pb.inc();
     }
-    pb.finish();
+
+    log::debug!("thread with interval {} done", scan_interval);
 
     Ok(heap)
 }
@@ -272,10 +275,12 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let shared_pointers = Arc::new(pointers);
 
     let bar_output = if shared_config.progress {
-        Box::new(stderr()) as Box<dyn Write>
+        Box::new(stderr()) as Box<dyn Write + Send + Sync>
     } else {
-        Box::new(sink()) as Box<dyn Write>
+        Box::new(sink()) as Box<dyn Write + Send + Sync>
     };
+
+    log::debug!("bar_output is {}", shared_config.progress);
 
     let mb = MultiBar::on(bar_output);
     eprintln!("Scanning with {} threads...", shared_config.threads);
@@ -287,21 +292,29 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
         let child_strings = Arc::clone(&shared_strings);
         let child_pointers = Arc::clone(&shared_pointers);
         children.push(thread::spawn(move || {
-            find_matches(&child_config, &child_strings, &child_pointers, i, pb)
+            let res = find_matches(&child_config, &child_strings, &child_pointers, i, &mut pb);
+            pb.finish();
+            res
         }));
     }
+    thread::spawn(move || {
+        mb.listen();
+    });
 
-    mb.listen();
-
+    log::debug!("starting to merge all heaps");
     // Merge all of the heaps.
     let mut heap = BinaryHeap::<(usize, u32)>::new();
     for child in children {
         heap.append(&mut child.join().unwrap().unwrap());
     }
 
+    log::debug!("finished merging all heaps");
+
     // Print (up to) top N results.
     for _ in 0..shared_config.max_matches {
-        let Some((count, addr)) = heap.pop() else { break };
+        let Some((count, addr)) = heap.pop() else {
+            break;
+        };
         println!("0x{addr:08x}: {count}");
     }
 
