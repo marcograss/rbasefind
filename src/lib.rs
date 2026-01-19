@@ -35,7 +35,7 @@ impl Config {
 
         let config = Self {
             big_endian: arg_matches.get_flag("bigendian"),
-            filename: arg_matches.get_one::<String>("INPUT").unwrap().to_string(),
+            filename: arg_matches.get_one::<String>("INPUT").unwrap().clone(),
             max_matches: match arg_matches
                 .get_one::<String>("maxmatches")
                 .unwrap_or(&"10".to_string())
@@ -167,14 +167,14 @@ impl Interval {
         }
 
         let mut start_addr = index as u64
-            * ((u64::from(u32::max_value()) + max_threads as u64 - 1) / max_threads as u64);
+            * u64::from(u32::MAX).div_ceil(max_threads as u64);
         let mut end_addr = (index as u64 + 1)
-            * ((u64::from(u32::max_value()) + max_threads as u64 - 1) / max_threads as u64);
+            * u64::from(u32::MAX).div_ceil(max_threads as u64);
 
         // Mask the address such that it's aligned to the 2^N offset.
         start_addr &= !(u64::from(offset) - 1);
-        if end_addr >= u64::from(u32::max_value()) {
-            end_addr = u64::from(u32::max_value());
+        if end_addr >= u64::from(u32::MAX) {
+            end_addr = u64::from(u32::MAX);
         } else {
             end_addr &= !(u64::from(offset) - 1);
         }
@@ -243,11 +243,11 @@ fn find_matches(
         match current_addr.checked_add(config.offset) {
             Some(_) => current_addr += config.offset,
             None => break,
-        };
+        }
         pb.inc();
     }
 
-    log::debug!("thread with interval {} done", scan_interval);
+    log::debug!("thread with interval {scan_interval} done");
 
     Ok(heap)
 }
@@ -334,42 +334,42 @@ mod tests {
     #[test]
     fn find_matches_single_cpu_interval_0() {
         let interval = Interval::get_range(0, 1, 0x1000).unwrap();
-        assert_eq!(interval.start_addr, u32::min_value());
-        assert_eq!(interval.end_addr, u32::max_value());
+        assert_eq!(interval.start_addr, u32::MIN);
+        assert_eq!(interval.end_addr, u32::MAX);
     }
 
     #[test]
     fn find_matches_double_cpu_interval_0() {
         let interval = Interval::get_range(0, 2, 0x1000).unwrap();
-        assert_eq!(interval.start_addr, u32::min_value());
-        assert_eq!(interval.end_addr, 0x80000000);
+        assert_eq!(interval.start_addr, u32::MIN);
+        assert_eq!(interval.end_addr, 0x8000_0000);
     }
 
     #[test]
     fn find_matches_double_cpu_interval_1() {
         let interval = Interval::get_range(1, 2, 0x1000).unwrap();
-        assert_eq!(interval.start_addr, 0x80000000);
-        assert_eq!(interval.end_addr, u32::max_value());
+        assert_eq!(interval.start_addr, 0x8000_0000);
+        assert_eq!(interval.end_addr, u32::MAX);
     }
 
     #[test]
     fn find_matches_triple_cpu_interval_0() {
         let interval = Interval::get_range(0, 3, 0x1000).unwrap();
-        assert_eq!(interval.start_addr, u32::min_value());
-        assert_eq!(interval.end_addr, 0x55555000);
+        assert_eq!(interval.start_addr, u32::MIN);
+        assert_eq!(interval.end_addr, 0x5555_5000);
     }
 
     #[test]
     fn find_matches_triple_cpu_interval_1() {
         let interval = Interval::get_range(1, 3, 0x1000).unwrap();
-        assert_eq!(interval.start_addr, 0x55555000);
-        assert_eq!(interval.end_addr, 0xAAAAA000);
+        assert_eq!(interval.start_addr, 0x5555_5000);
+        assert_eq!(interval.end_addr, 0xAAAA_A000);
     }
 
     #[test]
     fn find_matches_triple_cpu_interval_2() {
         let interval = Interval::get_range(2, 3, 0x1000).unwrap();
-        assert_eq!(interval.start_addr, 0xAAAAA000);
-        assert_eq!(interval.end_addr, u32::max_value());
+        assert_eq!(interval.start_addr, 0xAAAA_A000);
+        assert_eq!(interval.end_addr, u32::MAX);
     }
 }
