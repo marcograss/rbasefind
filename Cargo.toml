@@ -10,6 +10,13 @@ clap = { version = "4", features = ["derive"] }
 env_logger = "0.11.8"
 fnv = "1.0.7"
 log = "0.4.29"
-pbr = "1.1.1"
+memmap2 = "0.9"
+rayon = "1.10"
 regex = "1.12.2"
 thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "warn"
