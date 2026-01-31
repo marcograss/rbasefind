@@ -1,130 +1,99 @@
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
-use clap::{value_parser, Arg, ArgAction, Command};
+use clap::Parser;
 use fnv::FnvHashSet;
 use pbr::MultiBar;
 use regex::bytes::Regex;
 use std::collections::BinaryHeap;
-use std::error::Error;
 use std::io::{sink, stderr, Cursor, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use thiserror::Error;
 
-pub struct Config {
-    big_endian: bool,
-    filename: String,
-    min_str_len: usize,
-    max_matches: usize,
-    offset: u32,
-    progress: bool,
-    threads: usize,
+#[derive(Error, Debug)]
+pub enum RbasefindError {
+    #[error("failed to read input file: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("failed to parse regex: {0}")]
+    Regex(#[from] regex::Error),
+
+    #[error("binary too large for 32-bit addressing")]
+    BinaryTooLarge(#[from] std::num::TryFromIntError),
+
+    #[error("no strings found in target binary")]
+    NoStringsFound,
+
+    #[error("thread panicked during matching")]
+    ThreadPanic,
+
+    #[error("thread error: {0}")]
+    ThreadError(String),
+
+    #[error("invalid interval index")]
+    InvalidIntervalIndex,
+
+    #[error("invalid offset: must be a power of 2")]
+    InvalidOffset,
 }
 
-impl Config {
-    /// # Errors
-    /// Returns an error if offset parsing fails or offset is not a power of 2.
-    ///
-    /// # Panics
-    /// Panics if the required INPUT argument is missing (should never happen as clap enforces it).
-    pub fn new() -> Result<Self, &'static str> {
-        let arg_matches = Self::get_matches();
+fn parse_hex_offset(s: &str) -> Result<u32, String> {
+    let hex_digits = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .ok_or_else(|| "offset must begin with 0x or 0X".to_string())?;
 
-        let offset_str = arg_matches
-            .get_one::<String>("offset")
-            .map_or("0x1000", String::as_str);
+    let offset = u32::from_str_radix(hex_digits, 16)
+        .map_err(|e| format!("failed to parse offset: {e}"))?;
 
-        let Some(hex_digits) = offset_str.strip_prefix("0x") else {
-            return Err("ensure offset parameter begins with 0x.");
-        };
-
-        let Ok(offset_num) = u32::from_str_radix(hex_digits, 16) else {
-            return Err("failed to parse offset");
-        };
-
-        // This check also prevents offset_num from being zero.
-        if offset_num.count_ones() != 1 {
-            return Err("Offset is not a power of 2");
-        }
-
-        let threads_arg = arg_matches.get_one::<usize>("threads").copied().unwrap_or(0);
-        let threads = if threads_arg == 0 {
-            thread::available_parallelism().map_or(1, std::num::NonZero::get)
-        } else {
-            threads_arg
-        };
-
-        let config = Self {
-            big_endian: arg_matches.get_flag("bigendian"),
-            filename: arg_matches
-                .get_one::<String>("INPUT")
-                .expect("INPUT is required")
-                .clone(),
-            max_matches: arg_matches.get_one::<usize>("maxmatches").copied().unwrap_or(10),
-            min_str_len: arg_matches.get_one::<usize>("minstrlen").copied().unwrap_or(10),
-            offset: offset_num,
-            progress: arg_matches.get_flag("progress"),
-            threads,
-        };
-
-        Ok(config)
+    if offset.count_ones() != 1 {
+        return Err("offset must be a power of 2".to_string());
     }
 
-    fn get_matches() -> clap::ArgMatches {
-        Command::new("rbasefind")
-            .version(env!("CARGO_PKG_VERSION"))
-            .author("Scott G. <github.scott@gmail.com>")
-            .about(
-                "Scan a flat 32-bit binary and attempt to brute-force the base address via \
-                 string/pointer comparison. Based on the excellent basefind.py by mncoppola.",
-            )
-            .arg(
-                Arg::new("INPUT")
-                    .help("The input binary to scan")
-                    .required(true),
-            )
-            .arg(
-                Arg::new("bigendian")
-                    .long("bigendian")
-                    .short('b')
-                    .action(ArgAction::SetTrue)
-                    .help("Interpret as big-endian (default is little)"),
-            )
-            .arg(
-                Arg::new("minstrlen")
-                    .long("minstrlen")
-                    .short('m')
-                    .value_parser(value_parser!(usize))
-                    .help("Minimum string search length (default is 10)"),
-            )
-            .arg(
-                Arg::new("maxmatches")
-                    .long("maxmatches")
-                    .short('n')
-                    .value_parser(value_parser!(usize))
-                    .help("Maximum matches to display (default is 10)"),
-            )
-            .arg(
-                Arg::new("progress")
-                    .long("progress")
-                    .short('p')
-                    .action(ArgAction::SetTrue)
-                    .help("Show progress"),
-            )
-            .arg(
-                Arg::new("offset")
-                    .long("offset")
-                    .short('o')
-                    .help("Scan every N (power of 2) addresses. (default is 0x1000)"),
-            )
-            .arg(
-                Arg::new("threads")
-                    .long("threads")
-                    .short('t')
-                    .value_parser(value_parser!(usize))
-                    .help("# of threads to spawn. (default is # of cpu cores)"),
-            )
-            .get_matches()
-    }
+    Ok(offset)
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "rbasefind",
+    version,
+    author = "Scott G. <github.scott@gmail.com>",
+    about = "Scan a flat 32-bit binary and attempt to brute-force the base address via \
+             string/pointer comparison. Based on the excellent basefind.py by mncoppola."
+)]
+pub struct Config {
+    /// The input binary to scan
+    #[arg()]
+    pub filename: PathBuf,
+
+    /// Interpret as big-endian (default is little)
+    #[arg(short = 'b', long)]
+    pub big_endian: bool,
+
+    /// Minimum string search length
+    #[arg(short = 'm', long, default_value = "10")]
+    pub min_str_len: usize,
+
+    /// Maximum matches to display
+    #[arg(short = 'n', long, default_value = "10")]
+    pub max_matches: usize,
+
+    /// Scan every N (power of 2) addresses
+    #[arg(short = 'o', long, default_value = "0x1000", value_parser = parse_hex_offset)]
+    pub offset: u32,
+
+    /// Show progress
+    #[arg(short = 'p', long)]
+    pub progress: bool,
+
+    /// Number of threads to spawn (default is number of cpu cores)
+    #[arg(short = 't', long, default_value_t = default_threads())]
+    pub threads: usize,
+}
+
+fn default_threads() -> usize {
+    thread::available_parallelism().map_or(1, std::num::NonZero::get)
 }
 
 pub struct Interval {
@@ -133,23 +102,19 @@ pub struct Interval {
 }
 
 impl Interval {
-    fn get_range(
-        index: usize,
-        max_threads: usize,
-        offset: u32,
-    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
+    fn get_range(index: usize, max_threads: usize, offset: u32) -> Result<Self, RbasefindError> {
         if index >= max_threads {
-            return Err("Invalid index specified".into());
+            return Err(RbasefindError::InvalidIntervalIndex);
         }
 
         if offset.count_ones() != 1 {
-            return Err("Invalid additive offset".into());
+            return Err(RbasefindError::InvalidOffset);
         }
 
-        let mut start_addr = index as u64
-            * u64::from(u32::MAX).div_ceil(max_threads as u64);
-        let mut end_addr = (index as u64 + 1)
-            * u64::from(u32::MAX).div_ceil(max_threads as u64);
+        let mut start_addr =
+            index as u64 * u64::from(u32::MAX).div_ceil(max_threads as u64);
+        let mut end_addr =
+            (index as u64 + 1) * u64::from(u32::MAX).div_ceil(max_threads as u64);
 
         // Mask the address such that it's aligned to the 2^N offset.
         start_addr &= !(u64::from(offset) - 1);
@@ -168,10 +133,10 @@ impl Interval {
     }
 }
 
-fn get_strings(config: &Config, buffer: &[u8]) -> Result<FnvHashSet<u32>, Box<dyn Error>> {
+fn get_strings(min_str_len: usize, buffer: &[u8]) -> Result<FnvHashSet<u32>, RbasefindError> {
     let mut strings = FnvHashSet::default();
 
-    let reg_str = format!("[ -~\\t\\r\\n]{{{},}}\x00", config.min_str_len);
+    let reg_str = format!("[ -~\\t\\r\\n]{{{min_str_len},}}\x00");
     for mat in Regex::new(&reg_str)?.find_iter(buffer) {
         strings.insert(mat.start().try_into()?);
     }
@@ -179,11 +144,11 @@ fn get_strings(config: &Config, buffer: &[u8]) -> Result<FnvHashSet<u32>, Box<dy
     Ok(strings)
 }
 
-fn get_pointers(config: &Config, buffer: &[u8]) -> FnvHashSet<u32> {
+fn get_pointers(big_endian: bool, buffer: &[u8]) -> FnvHashSet<u32> {
     let mut pointers = FnvHashSet::default();
     let mut rdr = Cursor::new(buffer);
     loop {
-        let res = if config.big_endian {
+        let res = if big_endian {
             rdr.read_u32::<BigEndian>()
         } else {
             rdr.read_u32::<LittleEndian>()
@@ -198,16 +163,17 @@ fn get_pointers(config: &Config, buffer: &[u8]) -> FnvHashSet<u32> {
 }
 
 fn find_matches(
-    config: &Config,
+    threads: usize,
+    offset: u32,
     strings: &FnvHashSet<u32>,
     pointers: &FnvHashSet<u32>,
     scan_interval: usize,
     pb: &mut pbr::ProgressBar<pbr::Pipe>,
-) -> Result<BinaryHeap<(usize, u32)>, Box<dyn Error + Send + Sync>> {
-    let interval = Interval::get_range(scan_interval, config.threads, config.offset)?;
+) -> Result<BinaryHeap<(usize, u32)>, RbasefindError> {
+    let interval = Interval::get_range(scan_interval, threads, offset)?;
     let mut current_addr = interval.start_addr;
     let mut heap = BinaryHeap::<(usize, u32)>::new();
-    pb.total = u64::from((interval.end_addr - interval.start_addr) / config.offset);
+    pb.total = u64::from((interval.end_addr - interval.start_addr) / offset);
     while current_addr <= interval.end_addr {
         let mut news = FnvHashSet::default();
         for s in strings {
@@ -220,8 +186,8 @@ fn find_matches(
         if !intersection.is_empty() {
             heap.push((intersection.len(), current_addr));
         }
-        match current_addr.checked_add(config.offset) {
-            Some(_) => current_addr += config.offset,
+        match current_addr.checked_add(offset) {
+            Some(_) => current_addr += offset,
             None => break,
         }
         pb.inc();
@@ -237,45 +203,45 @@ fn find_matches(
 /// - The input file cannot be opened or read
 /// - No strings are found in the target binary
 /// - A spawned thread panics or returns an error during matching
-pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
+pub fn run(config: &Config) -> Result<(), RbasefindError> {
     // Read in the input file. We jam it all into memory for now.
     let buffer = std::fs::read(&config.filename)?;
 
     // Find indices of strings.
-    let strings = get_strings(&config, &buffer)?;
+    let strings = get_strings(config.min_str_len, &buffer)?;
 
     if strings.is_empty() {
-        return Err("No strings found in target binary".into());
+        return Err(RbasefindError::NoStringsFound);
     }
     eprintln!("Located {} strings", strings.len());
 
-    let pointers = get_pointers(&config, &buffer);
+    let pointers = get_pointers(config.big_endian, &buffer);
     eprintln!("Located {} pointers", pointers.len());
 
     let mut children = vec![];
-    let shared_config = Arc::new(config);
+    let threads = config.threads;
+    let offset = config.offset;
     let shared_strings = Arc::new(strings);
     let shared_pointers = Arc::new(pointers);
 
-    let bar_output = if shared_config.progress {
-        Box::new(stderr()) as Box<dyn Write + Send + Sync>
+    let bar_output: Box<dyn Write + Send + Sync> = if config.progress {
+        Box::new(stderr())
     } else {
-        Box::new(sink()) as Box<dyn Write + Send + Sync>
+        Box::new(sink())
     };
 
-    log::debug!("bar_output is {}", shared_config.progress);
+    log::debug!("bar_output is {}", config.progress);
 
     let mb = MultiBar::on(bar_output);
-    eprintln!("Scanning with {} threads...", shared_config.threads);
-    for i in 0..shared_config.threads {
+    eprintln!("Scanning with {threads} threads...");
+    for i in 0..threads {
         let mut pb = mb.create_bar(100);
         pb.show_message = true;
         pb.set_max_refresh_rate(Some(Duration::from_millis(100)));
-        let child_config = Arc::clone(&shared_config);
         let child_strings = Arc::clone(&shared_strings);
         let child_pointers = Arc::clone(&shared_pointers);
         children.push(thread::spawn(move || {
-            let res = find_matches(&child_config, &child_strings, &child_pointers, i, &mut pb);
+            let res = find_matches(threads, offset, &child_strings, &child_pointers, i, &mut pb);
             pb.finish();
             res
         }));
@@ -288,17 +254,15 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     // Merge all of the heaps.
     let mut heap = BinaryHeap::<(usize, u32)>::new();
     for child in children {
-        let thread_result = child
-            .join()
-            .map_err(|_| -> Box<dyn Error> { "thread panicked".into() })?;
-        let mut matches = thread_result.map_err(|e| -> Box<dyn Error> { e })?;
+        let thread_result = child.join().map_err(|_| RbasefindError::ThreadPanic)?;
+        let mut matches = thread_result?;
         heap.append(&mut matches);
     }
 
     log::debug!("finished merging all heaps");
 
     // Print (up to) top N results.
-    for _ in 0..shared_config.max_matches {
+    for _ in 0..config.max_matches {
         let Some((count, addr)) = heap.pop() else {
             break;
         };
@@ -313,9 +277,9 @@ mod tests {
     use super::*;
 
     #[test]
-    #[should_panic(expected = "Invalid index specified")]
     fn find_matches_invalid_interval() {
-        let _ = Interval::get_range(1, 1, 0x1000).unwrap();
+        let result = Interval::get_range(1, 1, 0x1000);
+        assert!(matches!(result, Err(RbasefindError::InvalidIntervalIndex)));
     }
 
     #[test]
