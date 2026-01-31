@@ -38,7 +38,7 @@ impl Config {
             filename: arg_matches.get_one::<String>("INPUT").unwrap().clone(),
             max_matches: match arg_matches
                 .get_one::<String>("maxmatches")
-                .unwrap_or(&"10".to_string())
+                .map_or("10", String::as_str)
                 .parse()
             {
                 Ok(v) => v,
@@ -46,7 +46,7 @@ impl Config {
             },
             min_str_len: match arg_matches
                 .get_one::<String>("minstrlen")
-                .unwrap_or(&"10".to_string())
+                .map_or("10", String::as_str)
                 .parse()
             {
                 Ok(v) => v,
@@ -55,8 +55,7 @@ impl Config {
             offset: {
                 let offset_str = arg_matches
                     .get_one::<String>("offset")
-                    .unwrap_or(&"0x1000".to_string())
-                    .clone();
+                    .map_or("0x1000", String::as_str);
                 if offset_str.len() <= 2 {
                     return Err("offset format is invalid");
                 }
@@ -75,7 +74,7 @@ impl Config {
             progress: arg_matches.get_flag("progress"),
             threads: match arg_matches
                 .get_one::<String>("threads")
-                .unwrap_or(&"0".to_string())
+                .map_or("0", String::as_str)
                 .parse()
             {
                 Ok(v) => {
@@ -252,6 +251,14 @@ fn find_matches(
     Ok(heap)
 }
 
+/// # Errors
+/// Returns an error if:
+/// - The input file cannot be opened or read
+/// - No strings are found in the target binary
+/// - Thread operations fail
+///
+/// # Panics
+/// Panics if a spawned thread panics or returns an error during matching.
 pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     // Read in the input file. We jam it all into memory for now.
     let mut f = File::open(&config.filename)?;
@@ -326,7 +333,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "Invalid index specified")]
     fn find_matches_invalid_interval() {
         let _ = Interval::get_range(1, 1, 0x1000).unwrap();
     }
