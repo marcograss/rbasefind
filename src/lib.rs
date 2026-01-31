@@ -1,16 +1,11 @@
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
-use clap::ArgMatches;
-use clap::{Arg, ArgAction, Command};
+use clap::{value_parser, Arg, ArgAction, Command};
 use fnv::FnvHashSet;
 use pbr::MultiBar;
 use regex::bytes::Regex;
 use std::collections::BinaryHeap;
 use std::error::Error;
-use std::fs::File;
-use std::io::prelude::*;
-use std::io::sink;
-use std::io::stderr;
-use std::io::Cursor;
+use std::io::{sink, stderr, Cursor, Write};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -26,74 +21,57 @@ pub struct Config {
 }
 
 impl Config {
-    /// # Panics
-    /// can panic on erroneous configuration
     /// # Errors
-    /// can error if fails to parse some parameters or wrong format
+    /// Returns an error if offset parsing fails or offset is not a power of 2.
+    ///
+    /// # Panics
+    /// Panics if the required INPUT argument is missing (should never happen as clap enforces it).
     pub fn new() -> Result<Self, &'static str> {
         let arg_matches = Self::get_matches();
 
+        let offset_str = arg_matches
+            .get_one::<String>("offset")
+            .map_or("0x1000", String::as_str);
+
+        let Some(hex_digits) = offset_str.strip_prefix("0x") else {
+            return Err("ensure offset parameter begins with 0x.");
+        };
+
+        let Ok(offset_num) = u32::from_str_radix(hex_digits, 16) else {
+            return Err("failed to parse offset");
+        };
+
+        // This check also prevents offset_num from being zero.
+        if offset_num.count_ones() != 1 {
+            return Err("Offset is not a power of 2");
+        }
+
+        let threads_arg = arg_matches.get_one::<usize>("threads").copied().unwrap_or(0);
+        let threads = if threads_arg == 0 {
+            thread::available_parallelism().map_or(1, std::num::NonZero::get)
+        } else {
+            threads_arg
+        };
+
         let config = Self {
             big_endian: arg_matches.get_flag("bigendian"),
-            filename: arg_matches.get_one::<String>("INPUT").unwrap().clone(),
-            max_matches: match arg_matches
-                .get_one::<String>("maxmatches")
-                .map_or("10", String::as_str)
-                .parse()
-            {
-                Ok(v) => v,
-                Err(_) => return Err("failed to parse maxmatches"),
-            },
-            min_str_len: match arg_matches
-                .get_one::<String>("minstrlen")
-                .map_or("10", String::as_str)
-                .parse()
-            {
-                Ok(v) => v,
-                Err(_) => return Err("failed to parse minstrlen"),
-            },
-            offset: {
-                let offset_str = arg_matches
-                    .get_one::<String>("offset")
-                    .map_or("0x1000", String::as_str);
-                if offset_str.len() <= 2 {
-                    return Err("offset format is invalid");
-                }
-                if &offset_str[0..2] != "0x" {
-                    return Err("ensure offset parameter begins with 0x.");
-                }
-                let Ok(offset_num) = u32::from_str_radix(&offset_str[2..], 16) else {
-                    return Err("failed to parse offset");
-                };
-                // This check also prevents offset_num from being zero.
-                if offset_num.count_ones() != 1 {
-                    return Err("Offset is not a power of 2");
-                }
-                offset_num
-            },
+            filename: arg_matches
+                .get_one::<String>("INPUT")
+                .expect("INPUT is required")
+                .clone(),
+            max_matches: arg_matches.get_one::<usize>("maxmatches").copied().unwrap_or(10),
+            min_str_len: arg_matches.get_one::<usize>("minstrlen").copied().unwrap_or(10),
+            offset: offset_num,
             progress: arg_matches.get_flag("progress"),
-            threads: match arg_matches
-                .get_one::<String>("threads")
-                .map_or("0", String::as_str)
-                .parse()
-            {
-                Ok(v) => {
-                    if v == 0 {
-                        num_cpus::get()
-                    } else {
-                        v
-                    }
-                }
-                Err(_) => return Err("failed to parse threads"),
-            },
+            threads,
         };
 
         Ok(config)
     }
 
-    fn get_matches() -> ArgMatches {
+    fn get_matches() -> clap::ArgMatches {
         Command::new("rbasefind")
-            .version("0.1.3")
+            .version(env!("CARGO_PKG_VERSION"))
             .author("Scott G. <github.scott@gmail.com>")
             .about(
                 "Scan a flat 32-bit binary and attempt to brute-force the base address via \
@@ -115,12 +93,14 @@ impl Config {
                 Arg::new("minstrlen")
                     .long("minstrlen")
                     .short('m')
+                    .value_parser(value_parser!(usize))
                     .help("Minimum string search length (default is 10)"),
             )
             .arg(
                 Arg::new("maxmatches")
                     .long("maxmatches")
                     .short('n')
+                    .value_parser(value_parser!(usize))
                     .help("Maximum matches to display (default is 10)"),
             )
             .arg(
@@ -140,6 +120,7 @@ impl Config {
                 Arg::new("threads")
                     .long("threads")
                     .short('t')
+                    .value_parser(value_parser!(usize))
                     .help("# of threads to spawn. (default is # of cpu cores)"),
             )
             .get_matches()
@@ -200,7 +181,7 @@ fn get_strings(config: &Config, buffer: &[u8]) -> Result<FnvHashSet<u32>, Box<dy
 
 fn get_pointers(config: &Config, buffer: &[u8]) -> FnvHashSet<u32> {
     let mut pointers = FnvHashSet::default();
-    let mut rdr = Cursor::new(&buffer);
+    let mut rdr = Cursor::new(buffer);
     loop {
         let res = if config.big_endian {
             rdr.read_u32::<BigEndian>()
@@ -255,15 +236,10 @@ fn find_matches(
 /// Returns an error if:
 /// - The input file cannot be opened or read
 /// - No strings are found in the target binary
-/// - Thread operations fail
-///
-/// # Panics
-/// Panics if a spawned thread panics or returns an error during matching.
+/// - A spawned thread panics or returns an error during matching
 pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     // Read in the input file. We jam it all into memory for now.
-    let mut f = File::open(&config.filename)?;
-    let mut buffer = Vec::new();
-    f.read_to_end(&mut buffer)?;
+    let buffer = std::fs::read(&config.filename)?;
 
     // Find indices of strings.
     let strings = get_strings(&config, &buffer)?;
@@ -312,7 +288,11 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     // Merge all of the heaps.
     let mut heap = BinaryHeap::<(usize, u32)>::new();
     for child in children {
-        heap.append(&mut child.join().unwrap().unwrap());
+        let thread_result = child
+            .join()
+            .map_err(|_| -> Box<dyn Error> { "thread panicked".into() })?;
+        let mut matches = thread_result.map_err(|e| -> Box<dyn Error> { e })?;
+        heap.append(&mut matches);
     }
 
     log::debug!("finished merging all heaps");
