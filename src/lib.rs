@@ -33,8 +33,8 @@ fn parse_hex_offset(s: &str) -> Result<u32, String> {
         .or_else(|| s.strip_prefix("0X"))
         .ok_or_else(|| "offset must begin with 0x or 0X".to_string())?;
 
-    let offset = u32::from_str_radix(hex_digits, 16)
-        .map_err(|e| format!("failed to parse offset: {e}"))?;
+    let offset =
+        u32::from_str_radix(hex_digits, 16).map_err(|e| format!("failed to parse offset: {e}"))?;
 
     if offset.count_ones() != 1 {
         return Err("offset must be a power of 2".to_string());
